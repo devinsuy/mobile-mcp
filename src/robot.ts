@@ -44,6 +44,44 @@ export class ActionableError extends Error {
 
 export type Orientation = "portrait" | "landscape";
 
+export interface LogEntry {
+	timestamp: string;
+	level: "info" | "warn" | "error" | "debug";
+	tag?: string;
+	message: string;
+}
+
+export interface GetLogsOptions {
+	packageName?: string;  // Filter by app package
+	lines?: number;        // Number of lines to return (default 50)
+	level?: "all" | "error" | "warn" | "info";  // Filter by level
+	filter?: string;       // Regex filter for message content
+}
+
+export interface ReloadOptions {
+	metroPort?: number;    // Metro bundler port (default 8081)
+}
+
+export interface NetworkRequest {
+	id: string;
+	timestamp: string;
+	type: "request" | "response" | "error";
+	method: string;
+	url: string;
+	status?: number;
+	duration?: number;
+	requestHeaders?: Record<string, string>;
+	requestBody?: string;
+	responseBody?: string;
+	error?: string;
+}
+
+export interface GetNetworkRequestsOptions {
+	packageName?: string;  // Filter by app package
+	count?: number;        // Number of requests to return (default 20)
+	filterUrl?: string;    // Regex to filter by URL
+}
+
 export interface Robot {
 	/**
 	 * Get the screen size of the device in pixels.
@@ -143,4 +181,26 @@ export interface Robot {
 	 * Get the current screen orientation.
 	 */
 	getOrientation(): Promise<Orientation>;
+
+	/**
+	 * Get application logs from the device.
+	 * @param options - Options for filtering logs
+	 * @returns Array of log entries
+	 */
+	getLogs?(options?: GetLogsOptions): Promise<LogEntry[]>;
+
+	/**
+	 * Reload the JavaScript bundle (hot reload).
+	 * Triggers Metro bundler to send updated JS to the app.
+	 * @param options - Reload options
+	 */
+	reloadApp?(options?: ReloadOptions): Promise<void>;
+
+	/**
+	 * Get network requests logged by the app.
+	 * Requires app-side instrumentation (NetworkLogger).
+	 * @param options - Options for filtering requests
+	 * @returns Array of network requests
+	 */
+	getNetworkRequests?(options?: GetNetworkRequestsOptions): Promise<NetworkRequest[]>;
 }

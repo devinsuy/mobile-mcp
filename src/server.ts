@@ -12,12 +12,14 @@ import { PNG } from "./png";
 import { isScalingAvailable, Image } from "./image-utils";
 import { Mobilecli } from "./mobilecli";
 import { MobileDevice } from "./mobile-device";
+import { VegaRobot } from "./vega";
+import { getVegaDeviceManager } from "./vega-device-manager";
 
 interface MobilecliDevice {
 	id: string;
 	name: string;
-	platform: "android" | "ios";
-	type: "real" | "emulator" | "simulator";
+	platform: "android" | "ios" | "vega";
+	type: "real" | "emulator" | "simulator" | "virtual";
 	version: string;
 	state: "online" | "offline";
 }
@@ -147,6 +149,12 @@ export const createMcpServer = (): McpServer => {
 
 	const getRobotFromDevice = (deviceId: string): Robot => {
 
+		// Check if it's a Vega device first (doesn't require mobilecli)
+		const vegaManager = getVegaDeviceManager();
+		if (vegaManager.isVegaDevice(deviceId)) {
+			return new VegaRobot(deviceId);
+		}
+
 		// from now on, we must have mobilecli working
 		ensureMobilecliAvailable();
 
@@ -194,12 +202,40 @@ export const createMcpServer = (): McpServer => {
 		{ readOnlyHint: true },
 		async ({}) => {
 
-			// from today onward, we must have mobilecli working
-			ensureMobilecliAvailable();
+			const devices: MobilecliDevice[] = [];
+
+			// Get Vega devices first (doesn't require mobilecli)
+			try {
+				const vegaManager = getVegaDeviceManager();
+				const vegaDevices = vegaManager.getDevices();
+				for (const device of vegaDevices) {
+					devices.push({
+						id: device.id,
+						name: device.name,
+						platform: "vega",
+						type: device.type,
+						version: "VegaOS",
+						state: device.state === "booted" ? "online" : "offline",
+					});
+				}
+			} catch (error: any) {
+				// Vega not available, continue
+			}
+
+			// from today onward, we must have mobilecli working for Android/iOS
+			try {
+				ensureMobilecliAvailable();
+			} catch (e) {
+				// If mobilecli is not available but we have Vega devices, return those
+				if (devices.length > 0) {
+					const out: MobilecliDevicesResponse = { devices };
+					return JSON.stringify(out);
+				}
+				throw e;
+			}
 
 			const iosManager = new IosManager();
 			const androidManager = new AndroidDeviceManager();
-			const devices: MobilecliDevice[] = [];
 
 			// Get Android devices with details
 			const androidDevices = androidManager.getConnectedDevicesWithDetails();
@@ -309,7 +345,7 @@ export const createMcpServer = (): McpServer => {
 		"Install an app on mobile device",
 		{
 			device: z.string().describe("The device identifier to use. Use mobile_list_available_devices to find which devices are available to you."),
-			path: z.string().describe("The path to the app file to install. For iOS simulators, provide a .zip file or a .app directory. For Android provide an .apk file. For iOS real devices provide an .ipa file"),
+			path: z.string().describe("The path to the app file to install. For iOS simulators, provide a .zip file or a .app directory. For Android provide an .apk file. For iOS real devices provide an .ipa file. For Vega/Fire TV devices provide a .vpkg file"),
 		},
 		{ destructiveHint: true },
 		async ({ device, path }) => {
@@ -448,7 +484,7 @@ export const createMcpServer = (): McpServer => {
 		"Press a button on device",
 		{
 			device: z.string().describe("The device identifier to use. Use mobile_list_available_devices to find which devices are available to you."),
-			button: z.string().describe("The button to press. Supported buttons: BACK (android only), HOME, VOLUME_UP, VOLUME_DOWN, ENTER, DPAD_CENTER (android tv only), DPAD_UP (android tv only), DPAD_DOWN (android tv only), DPAD_LEFT (android tv only), DPAD_RIGHT (android tv only)"),
+			button: z.string().describe("The button to press. Supported buttons: BACK (android/vega), HOME, VOLUME_UP, VOLUME_DOWN, ENTER, DPAD_CENTER (android tv/vega), DPAD_UP (android tv/vega), DPAD_DOWN (android tv/vega), DPAD_LEFT (android tv/vega), DPAD_RIGHT (android tv/vega), PLAY_PAUSE (vega), MEDIA_REWIND (vega), MEDIA_FAST_FORWARD (vega)"),
 		},
 		{ destructiveHint: true },
 		async ({ device, button }) => {
@@ -634,6 +670,118 @@ export const createMcpServer = (): McpServer => {
 			const robot = getRobotFromDevice(device);
 			const orientation = await robot.getOrientation();
 			return `Current device orientation is ${orientation}`;
+		}
+	);
+
+	tool(
+		"mobile_get_logs",
+		"Get App Logs",
+		"Get application logs from the device. Useful for debugging app crashes, errors, and console output. Currently supported on Vega/Fire TV devices.",
+		{
+			device: z.string().describe("The device identifier to use. Use mobile_list_available_devices to find which devices are available to you."),
+			packageName: z.string().optional().describe("Filter logs by app package name (e.g., 'com.amzn.music.hornettv')"),
+			lines: z.number().optional().describe("Number of log lines to return (default: 50)"),
+			level: z.enum(["all", "error", "warn", "info"]).optional().describe("Filter by log level. 'error' shows only errors, 'warn' shows errors and warnings, 'info' shows all levels."),
+			filter: z.string().optional().describe("Regex pattern to filter log messages"),
+		},
+		{ readOnlyHint: true },
+		async ({ device, packageName, lines, level, filter }) => {
+			const robot = getRobotFromDevice(device);
+
+			if (!robot.getLogs) {
+				throw new ActionableError("Log retrieval is not supported on this device type. Currently only Vega/Fire TV devices support this feature.");
+			}
+
+			const logs = await robot.getLogs({ packageName, lines, level, filter });
+
+			if (logs.length === 0) {
+				return "No logs found matching the specified criteria.";
+			}
+
+			// Format logs for display
+			const formattedLogs = logs.map(entry => {
+				const levelIcon = entry.level === "error" ? "❌" : entry.level === "warn" ? "⚠️" : "ℹ️";
+				const tag = entry.tag ? `[${entry.tag}]` : "";
+				return `${levelIcon} ${entry.timestamp} ${tag} ${entry.message}`;
+			}).join("\n");
+
+			return `Found ${logs.length} log entries:\n\n${formattedLogs}`;
+		}
+	);
+
+	tool(
+		"mobile_reload_app",
+		"Reload App",
+		"Trigger a hot reload of the JavaScript bundle. Much faster than a full rebuild - use this after making JS/TS code changes. Requires Metro bundler to be running.",
+		{
+			device: z.string().describe("The device identifier to use. Use mobile_list_available_devices to find which devices are available to you."),
+			metroPort: z.number().optional().describe("Metro bundler port (default: 8081)"),
+		},
+		{ destructiveHint: true },
+		async ({ device, metroPort }) => {
+			const robot = getRobotFromDevice(device);
+
+			if (!robot.reloadApp) {
+				throw new ActionableError("Hot reload is not supported on this device type. Currently only Vega/Fire TV devices with Metro bundler support this feature.");
+			}
+
+			await robot.reloadApp({ metroPort });
+			return "App reloaded successfully. The JavaScript bundle has been refreshed.";
+		}
+	);
+
+	tool(
+		"mobile_get_network_requests",
+		"Get Network Requests",
+		"Get HTTP/GraphQL network requests made by the app. Useful for debugging API calls, seeing request/response bodies, and troubleshooting errors. Requires the app to have NetworkLogger instrumentation (included in Vega TV app devtools).",
+		{
+			device: z.string().describe("The device identifier to use. Use mobile_list_available_devices to find which devices are available to you."),
+			packageName: z.string().optional().describe("Filter by app package name (e.g., 'com.amzn.music.hornettv')"),
+			count: z.number().optional().describe("Number of requests to return (default: 20)"),
+			filterUrl: z.string().optional().describe("Regex pattern to filter by URL (e.g., 'graphql' or 'api.example.com')"),
+		},
+		{ readOnlyHint: true },
+		async ({ device, packageName, count, filterUrl }) => {
+			const robot = getRobotFromDevice(device);
+
+			if (!robot.getNetworkRequests) {
+				throw new ActionableError("Network request inspection is not supported on this device type. Currently only Vega/Fire TV devices with app-side NetworkLogger support this feature.");
+			}
+
+			const requests = await robot.getNetworkRequests({ packageName, count, filterUrl });
+
+			if (requests.length === 0) {
+				return "No network requests found. Make sure the app has NetworkLogger instrumentation and has made some requests.";
+			}
+
+			// Format requests for display
+			const formattedRequests = requests.map(req => {
+				const statusIcon = req.type === "error" ? "❌" :
+					req.type === "response" ? (req.status && req.status >= 400 ? "⚠️" : "✅") : "➡️";
+
+				let output = `${statusIcon} ${req.method} ${req.url}`;
+
+				if (req.status !== undefined) {
+					output += ` [${req.status}]`;
+				}
+				if (req.duration !== undefined) {
+					output += ` (${req.duration}ms)`;
+				}
+				if (req.error) {
+					output += `\n   Error: ${req.error}`;
+				}
+				if (req.responseBody) {
+					// Truncate long bodies
+					const body = req.responseBody.length > 500
+						? req.responseBody.substring(0, 500) + "..."
+						: req.responseBody;
+					output += `\n   Response: ${body}`;
+				}
+
+				return output;
+			}).join("\n\n");
+
+			return `Found ${requests.length} network requests:\n\n${formattedRequests}`;
 		}
 	);
 
